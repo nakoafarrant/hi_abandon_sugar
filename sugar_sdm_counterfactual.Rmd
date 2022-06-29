@@ -1,0 +1,418 @@
+---
+title: "Sugar Species Distribution Model"
+author: "D. Nākoa Farrant"
+date: '2022-06-29'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(RColorBrewer)
+library(cowplot) # for ggdraw plot
+library(raster)
+library(fasterize)
+library(sf)
+library(rgdal)
+library(terra)
+library(wallace)
+```
+
+Goal is to run a species distribution model (Maxent) to determine the habitat suitability envelope for sugarcane across Hawai'i
+1) Get "occurrence" points by gridding the sugarcane shapefiles for all historic sugarcane in Hawai'i. Make sure it's in the same projection as all of the other environmental data
+2) Gather environmental data:
+- precipitation, temperature, elevation, slope, aspect?, soil organic matter percent, soil cation exchange capacity
+
+3) ensure all environmental rasters are in the same projection, extent, and resolution
+
+4) specify a region of interest
+
+5) lay down random background points?
+
+```{r}
+hi_soil <- st_read("env_variables/soil_props/All_Properties.shp") %>% 
+  st_transform(st_crs(4326)) %>% 
+  st_set_precision(1e6) %>% 
+  st_make_valid() # class sf and data.frame
+
+```
+
+
+```{r}
+ext <- floor(extent(hi_soil))
+r <- raster(ext, res = 0.00225) # resolution taken from the precipiation raster
+cec_raster <- fasterize(hi_soil, r, "CECmod_rep")# fasterize is way faster than rasterize function
+pH_raster <- fasterize(hi_soil, r, "pHmod_rep")
+Ksat_raster <- fasterize(hi_soil, r, "Ksat_rep")
+OM_raster <- fasterize(hi_soil, r, "OM_rep")
+```
+
+```{r}
+#plot(cec_raster)
+#plot(pH_raster)
+#plot(Ksat_raster)
+#plot(OM_raster)
+```
+
+```{r}
+# Landfire Topographical data for 2020
+# https://landfire.gov/version_download.php#
+# Elevation units of meters from 0m to 4199m
+# grid cell is 30 meters 
+elev <- raster("env_variables/landfire_topography/LH20_elev_GCS_WGS84.tif")
+
+# Aspect units of degrees from 0 to 359
+# grid cell is 30 meters
+# Per Carla's previous recommendation, might need to convert from degrees to be some kind of heading like north reading
+aspect <- raster("env_variables/landfire_topography/LH20_aspect_GCS_WGS84.tif")
+
+# Slope degrees from 0 to 79 degree
+# grid cells is 30 meters
+slope_deg <- raster("env_variables/landfire_topography/LH20_slpdeg_GCS_WGS84.tif")
+
+# Mean annual precipitation 250m resolution from HI rainfall atlas
+# mm units
+# http://rainfall.geography.hawaii.edu/downloads.html
+precip <- raster("env_variables/StateMapTIFs_mm/staterf_mmann_GCS_WGS84.tif") 
+
+# Mean annual air temperature 250m resolution from HI Evapotranspiration atlas
+# degree C units
+temp <- raster("env_variables/Tair_month_raster/tair_ann.tif")
+
+# Relative humidity annually at 250m resolution 
+# http://evapotranspiration.geography.hawaii.edu/downloads.html
+humidity <- raster("env_variables/RH_month_raster/rh_ann.tif")
+
+# soil moisture at 250m resolution
+# http://evapotranspiration.geography.hawaii.edu/downloads.html
+soil_moist <- raster("env_variables/SoilMoisture_month_raster/sl_mst_ann.tif")
+
+# Surface temperature annually at 250m. Degrees C
+# http://evapotranspiration.geography.hawaii.edu/downloads.html
+surf_temp <- raster("env_variables/TSurf_month_raster/tsurf_ann.tif")
+
+# read in slope percent rise raster
+slp_pct <- raster("env_variables/landfire_topography/LH20_slppct_GCS_WGS84.tif")
+```
+
+
+```{r}
+aspect_radians <- aspect*pi/180 # convert from degrees to radians
+
+asp_northing <- cos(aspect_radians) # extract aspect northness component
+asp_easting <- sin(aspect_radians) # extract aspect eastness component
+```
+
+
+# Project all of the environmentl rasters into the same projection
+```{r}
+crs(elev) <- st_crs(4326)$wkt
+crs(aspect) <- st_crs(4326)$wkt
+crs(slope_deg) <- st_crs(4326)$wkt
+crs(precip) <- st_crs(4326)$wkt
+crs(temp) <- st_crs(4326)$wkt
+crs(humidity) <- st_crs(4326)$wkt
+crs(soil_moist) <- st_crs(4326)$wkt
+crs(surf_temp) <- st_crs(4326)$wkt
+crs(cec_raster) <- st_crs(4326)$wkt
+crs(pH_raster) <- st_crs(4326)$wkt
+crs(Ksat_raster) <- st_crs(4326)$wkt
+crs(OM_raster) <- st_crs(4326)$wkt
+```
+
+
+# check resolutin of environmental layers
+```{r}
+res(elev)
+res(aspect)
+res(slope_deg)
+res(slp_pct)
+res(precip)
+res(temp)
+res(humidity)
+res(soil_moist)
+res(surf_temp)
+res(cec_raster)
+res(pH_raster)
+res(Ksat_raster)
+res(OM_raster)
+```
+
+```{r}
+
+# method for resampling is either bilinear or nearest neighbor "ngb"
+# nearest neighbor is best for categorical data
+# description of resampling methods is here: https://support.esri.com/en/technical-article/000005606
+
+elev_resamp <- resample(elev, precip, method = "bilinear")
+slpdg_resamp <- resample(slope_deg, precip, method = "bilinear")
+northing_resamp <- resample(asp_northing, precip, method = "bilinear")
+easting_resamp <- resample(asp_easting, precip, method = "bilinear")
+slppct_resamp <- resample(slp_pct, precip, method = "bilinear")
+cec_resamp <- resample(cec_raster, precip, method = "bilinear")
+pH_resamp <- resample(pH_raster, precip, method = "bilinear")
+Ksat_resamp <- resample(Ksat_raster, precip, method = "bilinear")
+OM_resamp <- resample(OM_raster, precip, method = "bilinear")
+```
+
+
+```{r}
+extent(elev_resamp)
+extent(slpdg_resamp)
+extent(slppct_resamp)
+extent(precip)
+extent(temp)
+extent(humidity)
+extent(soil_moist)
+extent(surf_temp)
+extent(northing_resamp)
+extent(easting_resamp)
+extent(cec_resamp)
+extent(pH_resamp)
+extent(Ksat_resamp)
+extent(OM_resamp)
+```
+
+
+```{r}
+writeRaster(elev_resamp,"env_variables/sdm_env_var/elev.tif", format="GTiff", overwrite = T)
+writeRaster(slpdg_resamp,"env_variables/sdm_env_var/slpdg.tif", format="GTiff", overwrite = T)
+writeRaster(precip,"env_variables/sdm_env_var/precip.tif", format="GTiff", overwrite = T)
+writeRaster(temp,"env_variables/sdm_env_var/temp.tif", format="GTiff", overwrite = T)
+writeRaster(humidity,"env_variables/sdm_env_var/humid.tif", format="GTiff", overwrite = T)
+writeRaster(soil_moist,"env_variables/sdm_env_var/soil_moist.tif", format="GTiff", overwrite = T)
+writeRaster(surf_temp,"env_variables/sdm_env_var/surf_temp.tif", format="GTiff", overwrite = T)
+writeRaster(northing_resamp,"env_variables/sdm_env_var/north.tif", format="GTiff", overwrite = T)
+writeRaster(easting_resamp,"env_variables/sdm_env_var/east.tif", format="GTiff", overwrite = T)
+writeRaster(slppct_resamp,"env_variables/sdm_env_var/slppct.tif", format="GTiff", overwrite = T)
+writeRaster(cec_resamp,"env_variables/sdm_env_var/cec.tif", format="GTiff", overwrite = T)
+writeRaster(pH_resamp,"env_variables/sdm_env_var/pH.tif", format="GTiff", overwrite = T)
+writeRaster(Ksat_resamp,"env_variables/sdm_env_var/Ksat.tif", format="GTiff", overwrite = T)
+writeRaster(OM_resamp,"env_variables/sdm_env_var/OM.tif", format="GTiff", overwrite = T)
+
+```
+
+
+# Identify occurrence points
+grid at the same resolution as whatever using for the climate data
+randomly put down points within polygons 
+```{r}
+# read in all sugar polygons
+all_hi_sugar <- st_read("ag_shapefiles/sugar1900to2020/sugar1900to2020.shp") 
+
+hi_sugar_reproject <- all_hi_sugar %>% 
+  st_transform(st_crs(4326)) %>% 
+  st_set_precision(1e6) %>% 
+  st_make_valid() # class sf and data.frame
+
+```
+
+Need to project the sugarcane shapefile in the same projection and need to get points within the sugarcane shapefile in that projection 
+
+```{r}
+s1900 <- st_read("ag_shapefiles/sugar_gee/sugar1900.shp") %>% 
+  st_transform(st_crs(4326)) %>% 
+  st_set_precision(1e6) %>% 
+  st_make_valid()
+s1920 <- st_read("ag_shapefiles/sugar_gee/sugar1920.shp") %>% 
+  st_transform(st_crs(4326)) %>% 
+  st_set_precision(1e6) %>% 
+  st_make_valid()
+s1937 <- st_read("ag_shapefiles/sugar_gee/sugar1937.shp") %>% 
+  st_transform(st_crs(4326)) %>% 
+  st_set_precision(1e6) %>% 
+  st_make_valid()
+ag1980 <- st_read("ag_shapefiles/sugar_gee/ag1980_noblank.shp")%>% 
+  st_transform(st_crs(4326)) %>% 
+  st_set_precision(1e6) %>% 
+  st_make_valid()
+ag2015 <- st_read("ag_shapefiles/sugar_gee/ag2015.shp")%>% 
+  st_transform(st_crs(4326)) %>% 
+  st_set_precision(1e6) %>% 
+  st_make_valid()
+ag2020 <- st_read("ag_shapefiles/sugar_gee/ag2020.shp")%>% 
+  st_transform(st_crs(4326)) %>% 
+  st_set_precision(1e6) %>% 
+  st_make_valid()
+
+# extract sugar for 2015 and 2020
+s2015 <- ag2015 %>% 
+  filter(CropCatego == "Sugar")
+
+s2020 <- ag2020 %>% 
+  filter(Crops_2020 == "Sugar")
+```
+
+```{r}
+s1900_1920 <- st_union(s1900, s1920)
+s1900_1920_1937 <- st_union(s1900_1920, s1937)
+s1900_1920_1937_1980 <- st_union(s1900_1920_1937, s1980)
+s1900_1920_1937_1980_2015 <- st_union(s1900_1920_1937_1980, s2015)
+s1900_1920_1937_1980_2015_2020 <- st_union(s1900_1920_1937_1980_2015, s2020)
+```
+
+
+# Create reference presence points
+
+Ideally don't want to sample occurrence points randomly. You want to do a tiered sampling of occurrence points so it is 1000 points from fields that were cultivated in 1900, 1000 points from fields cultivated in 1920, ... etc.
+```{r}
+sugar_centroids <- st_centroid(all_hi_sugar)
+
+sugar_centroids_reproject <- sugar_centroids %>% 
+  st_transform(st_crs(4326)) %>% 
+  st_set_precision(1e6) %>% 
+  st_make_valid() # class sf and data.frame
+```
+```{r}
+sugar_centroid_reproj_coords <- do.call(rbind, st_geometry(sugar_centroids_reproject)) %>% 
+  as.tibble() %>% 
+  setNames(c("longitude", "latitude")) %>% 
+  mutate(name = "sugar")
+```
+
+```{r}
+sugar_centroid_occ_points <- sugar_centroid_reproj_coords %>% 
+  dplyr::select(name, longitude, latitude)
+```
+
+```{r}
+write.csv(sugar_centroid_occ_points, "occurrences/sugar_centroid_occ_points.csv", row.names = F)
+```
+
+```{r}
+sugar_points <- st_sample(hi_sugar_reproject, size = 500, type = "random")
+```
+
+```{r}
+plot(sugar_points)
+```
+
+
+
+```{r}
+sugar_points_coords <- do.call(rbind, st_geometry(sugar_points)) %>% 
+  as.tibble() %>% 
+  setNames(c("longitude", "latitude")) %>% 
+  mutate(name = "sugar")
+```
+
+```{r}
+sugar_occ_points <- sugar_points_coords %>% 
+  dplyr::select(name, longitude, latitude)
+```
+
+```{r}
+write.csv(sugar_occ_points, "occurrences/sugar_occ_points.csv", row.names = F)
+```
+
+```{r}
+sugar_points2k <- st_sample(hi_sugar_reproject, size = 2000, type = "random")
+```
+
+
+```{r}
+sugar_points2k_coords <- do.call(rbind, st_geometry(sugar_points2k)) %>% 
+  as.tibble() %>% 
+  setNames(c("longitude", "latitude")) %>% 
+  mutate(name = "sugar")
+```
+
+```{r}
+sugar_occ2k_points <- sugar_points2k_coords %>% 
+  dplyr::select(name, longitude, latitude)
+```
+
+```{r}
+write.csv(sugar_occ2k_points, "occurrences/sugar_occ2k_points.csv", row.names = F)
+```
+
+# create the extent from which background points will be drawn
+Start with all the land in the Hawaiian Islands
+Reduce it to be regions where elevation goes from 0m to the max elevation at which sugarcane is found 
+
+```{r}
+hi_background_poly <- st_read("coast_n83/coast_n83.shp") %>% 
+  st_transform(st_crs(4326)) %>% 
+  st_set_precision(1e6) %>% 
+  st_make_valid() # class sf and data.frame
+```
+
+
+```{r}
+all_sugar_elev_max <- raster::extract(elev_resamp, hi_sugar_reproject, method = "bilinear")
+```
+
+```{r}
+sugar_elev_extract = raster::extract(elev_resamp, hi_sugar_reproject)
+```
+
+```{r}
+elev_poly <- rasterToPolygons(elev_resamp, n = 4, dissolve = F)
+```
+
+
+```{r}
+elev_sf <- st_as_sf(elev_poly)
+```
+
+```{r}
+st_crs(elev_poly)
+```
+
+
+
+# Run wallace to get the 50% 
+
+```{r}
+run_wallace()
+```
+
+
+# visually assessing bare areas
+some areas with Ka'u basalt on southern Hawaii Island seem to be bare at 750-1500 years old
+also some 1500-3000 year old areas
+
+Puna Basalt 400-750 years ago in vicinity of Volcano
+More 400-750 year old flows further north up the coast
+
+South of Kona, Ka'u Basalt 200-750 years ago
+Some coastal Hualalai flows from 1500-3000 years ago are bare near Kona
+
+Some bare areas speckled throughout the Hana coast but no single substantial area
+
+doesn't seem to be substantial bare areas on other islands
+
+
+# Environmental data updates
+Ideally you want climate data from the period in which different fields were cultivated (e.g. precipitation from year 1900)
+
+# Background points
+How many background points do we want? 10,000?
+Constrain background points to land (not ocean)
+Constrain background points to elevation range at which sugarcane might be grown
+- possibly also try to remove recent volcanic lava flows from the dat as well
+
+
+# reference field analysis
+
+```{r}
+ref_field_run8 <- raster("H:/github/ch1_abandon_patterns/maxent_model_results/Wallace_run8/rm.1_fc.LQ_thresh_p10_run8.tif")
+ref_field_run9 <- raster("H:/github/ch1_abandon_patterns/maxent_model_results/Wallace_run9/rm.1_fc.LQ_thresh_p10_run9.tif")
+ref_field_run10 <- raster("H:/github/ch1_abandon_patterns/maxent_model_results/Wallace_run10/rm.1_fc.LQ_thresh_p10_run10.tif")
+```
+
+```{r}
+reclass_matrix = cbind(is = c(0), becomes = c(NA))
+```
+
+
+```{r}
+ref_field_run8_reclass <- reclassify(ref_field_run8, reclass_matrix)
+ref_field_run9_reclass <- reclassify(ref_field_run9, reclass_matrix)
+ref_field_run10_reclass <- reclassify(ref_field_run10, reclass_matrix)
+```
+
+

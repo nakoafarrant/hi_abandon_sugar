@@ -1,0 +1,769 @@
+---
+title: "Patterns of Vegetation Recovery on Abandoned Agricultural Land"
+author: "D. Nākoa Farrant"
+date: '2022-06-29'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(plyr)
+library(tidyverse) #for datafrmae manipulation
+library(data.table) # for fread()
+library(Hmisc)
+library(corrplot)
+library(dplyr)
+library(sf)
+library(lwgeom)
+library(stargazer)
+library(kableExtra)
+library(viridis) # visualization package for color
+library(RColorBrewer)
+library(raster)
+library(sp)
+library(rgdal)
+library(terra)
+library(cowplot) # for ggdraw plot
+library(patchwork) # new plotting package
+library(ggspatial)
+#library(tmap) # alternative to leaflet to do some interactive maps and maybe select polygons interactively 
+#library(leaflet) # ideal for manual selection of polygons, but unsure if will have the opportunity to do that 
+#library(maptools) # for zonal statistics
+library(rnaturalearth)
+library(rnaturalearthdata)
+```
+
+
+# Abandonment sequence output from google earth engine
+```{r}
+abS_envvar <- st_read("gee_files-abanSugar/abanS_mergeStats_rmvEarlyAbandon.shp") %>% 
+  st_transform(st_crs(4326))%>% 
+  st_set_precision(1e6) %>% 
+  st_make_valid()
+```
+
+
+```{r}
+abS_short <- abS_envvar %>% 
+  dplyr::select(start, end, habstatus, lc, ndvi, evi, savi, msavi, ndmi, areaHa)
+```
+
+```{r}
+HI_coastline <- st_read("coast_n83/coast_n83.shp") %>% 
+  st_transform(st_crs(4326)) %>% 
+  st_set_precision(1e6) %>% 
+  st_make_valid() # class sf and data.frame
+```
+
+```{r}
+ggplot(abS_clean) +
+  geom_sf(aes(fill = start, color = start))
+
+ggplot(abS_clean) +
+  geom_sf(aes(fill = end, color = end))
+```
+
+```{r}
+# Ran repair geometry on cah_land_cover_poly.shp in ArcMap on June 21, 2022
+cah_lc_sf_repairedArc <- st_read("carbon_assessment_hi_shp/cah_repair_shp.shp") %>% # downloaded from GEE asset
+  st_transform(st_crs(4326)) %>% 
+  st_set_precision(1e6) %>% 
+  st_make_valid() 
+```
+
+```{r}
+cah_lc_sf_repairedArc <- cah_lc_sf_repairedArc %>% 
+  tibble::rownames_to_column("FID") %>% 
+  mutate(FID == as.numeric(FID))
+```
+
+
+```{r}
+sf::sf_use_s2(FALSE)
+abanS_rmvEarlyAban_cah <- st_intersection(st_make_valid(abS_envvar), st_make_valid(cah_lc_sf_repairedArc))
+
+```
+
+```{r}
+abanS_rmvEarlyAban_cah <- abanS_rmvEarlyAban_cah %>% 
+  mutate(FID = as.numeric(FID))
+```
+
+```{r}
+abanS_rmvEarlyAban_cah_poly <- abanS_rmvEarlyAban_cah %>%
+  filter(grepl("POLYGON", st_geometry_type(geometry)))
+```
+
+
+```{r}
+#st_write(abanS_rmvEarlyAban_cah, "abandon_sugar_cah/abanS_rmvEarly_cah.gpkg", driver = "gpkg")
+st_write(abanS_rmvEarlyAban_cah, "abandon_sugar_cah/abanS_rmvEarly_cah.shp")
+# failed to create several features in writing the export
+```
+
+
+
+```{r}
+abanS_cah_natural <- abanS_rmvEarlyAban_cah %>% 
+  filter(Maj_LC == "Grassland" | Maj_LC == "Shrubland" | Maj_LC == "Forest" | Maj_LC == "Not Vegetated") %>% 
+  tibble::rownames_to_column("ID") %>% 
+  mutate(ID = as.numeric(ID))
+```
+
+
+```{r}
+abanS_cah_natural_slim <- abanS_cah_natural %>% 
+  dplyr::select(ID, startYr, endYr, areaHa, Gen_LC, Maj_LC, Det_LC, Hab_Status, Moisture_Z, Biome_Unit)
+```
+
+```{r}
+abanS_cah_natural_slim_poly <- abanS_cah_natural_slim %>%
+  filter(grepl("POLYGON", st_geometry_type(geometry)))
+st_write(abanS_cah_natural_slim_poly, "abandon_sugar_cah/abanS_cah_natural_slim.shp")
+```
+
+# run this and the subsequent code chunks next
+```{r}
+hi_soil <- st_read("env_variables/soil_props/All_Properties.shp") %>% 
+  st_transform(st_crs(4326)) %>% 
+  st_set_precision(1e6) %>% 
+  st_make_valid() # class sf and data.frame
+
+# Geology spatial data source: https://www.sciencebase.gov/catalog/item/60df56d5d34ed15aa3b8a39c
+hi_geology <- st_read("HI_geology/HawaiiStateGeologicMap_GeMS-open/GM_MapUnitPolys.shp") %>% 
+  st_transform(st_crs(4326)) %>% 
+  st_set_precision(1000000) %>% 
+  st_make_valid() # class sf and data.frame
+
+```
+
+
+```{r}
+# Add numeric columns for the min, max, and mean ages for different geological features
+hi_geology <- hi_geology %>% 
+  mutate(MinAge = as.numeric(ifelse(AgeRange == "1,500-3,000 yr", 1500, 
+                          ifelse(AgeRange == "11,000-30,000 yr", 11000, 
+                                 ifelse(AgeRange == "11,000-65,000 yr", 11000,
+                                    ifelse(AgeRange == "120,000-260,000 yr", 120000,
+                                           ifelse(AgeRange == "200-400 yr", 200,
+                                                  ifelse(AgeRange == "200-750 yr", 200,
+                                                         ifelse(AgeRange == "260,000-500,000 yr", 260000,
+                                                                ifelse(AgeRange == "3,000-5,000 yr", 3000,
+                                                                       ifelse(AgeRange == "30,000-50,000 yr", 30000,
+                                                                              ifelse(AgeRange == "30,000-70,000 yr", 30000,
+                                                                                     ifelse(AgeRange == "400-750 yr", 400,
+                                                                                            ifelse(AgeRange == "5,000-11,000 yr", 5000,
+                                                                                                   ifelse(AgeRange == "64,000-300,000 yr", 64000,
+                                                                                                          ifelse(AgeRange == "750-1,500 yr", 750,
+                                                                                                                 ifelse(AgeRange == "A.D. 1410-1460", 2020-1460,
+                                                                                                                        ifelse(AgeRange == "A.D. 1790", 2020-1790,
+                                                                                                                               ifelse(AgeRange == "A.D. 1823", 2020-1823,
+                                                                                                                                      ifelse(AgeRange == "A.D. 1840", 2020-1840,
+                                                                                                                                             ifelse(AgeRange == "A.D. 1868", 2020-1868,
+                                                                                                                                                    ifelse(AgeRange == "A.D. 1880-1881", 2020-1881,
+                                                                                                                                                           ifelse(AgeRange == "A.D. 1955", 2020-1955,
+                                                                                                                                                                  ifelse(AgeRange == "A.D. 1961", 2020-1961,
+                                                                                                                                                                                ifelse(AgeRange == "A.D. 2007-2018", 2020-2018,
+                                                                                                                                                                                       ifelse(AgeRange == "A.D. 2018", 2020-2018,
+                                      ifelse(AgeRange == "Age 0.1-0.2 Ma", 100000, "NA"))))))))))))))))))))))))))) %>% 
+  mutate(MaxAge = as.numeric(ifelse(AgeRange == "1,500-3,000 yr", 3000, 
+                          ifelse(AgeRange == "11,000-30,000 yr", 30000, 
+                                 ifelse(AgeRange == "11,000-65,000 yr", 65000,
+                                    ifelse(AgeRange == "120,000-260,000 yr", 260000,
+                                           ifelse(AgeRange == "200-400 yr", 400,
+                                                  ifelse(AgeRange == "200-750 yr", 750,
+                                                         ifelse(AgeRange == "260,000-500,000 yr", 500000,
+                                                                ifelse(AgeRange == "3,000-5,000 yr", 5000,
+                                                                       ifelse(AgeRange == "30,000-50,000 yr", 50000,
+                                                                              ifelse(AgeRange == "30,000-70,000 yr", 70000,
+                                                                                     ifelse(AgeRange == "400-750 yr", 750,
+                                                                                            ifelse(AgeRange == "5,000-11,000 yr", 11000,
+                                                                                                   ifelse(AgeRange == "64,000-300,000 yr", 300000,
+                                                                                                          ifelse(AgeRange == "750-1,500 yr", 1500,
+                                                                                                                 ifelse(AgeRange == "A.D. 1410-1460", 2020-1410,
+                                                                                                                        ifelse(AgeRange == "A.D. 1790", 2020-1790,
+                                                                                                                               ifelse(AgeRange == "A.D. 1823", 2020-1823,
+                                                                                                                                      ifelse(AgeRange == "A.D. 1840", 2020-1840,
+                                                                                                                                             ifelse(AgeRange == "A.D. 1868", 2020-1868,
+                                                                                                                                                    ifelse(AgeRange == "A.D. 1880-1881", 2020-1880,
+                                                                                                                                                           ifelse(AgeRange == "A.D. 1955", 2020-1955,
+                                                                                                                                                                  ifelse(AgeRange == "A.D. 1961", 2020-1961,
+                                                                                                                                                                                ifelse(AgeRange == "A.D. 2007-2018", 2020-2007,
+                                                                                                                                                                                       ifelse(AgeRange == "A.D. 2018", 2020-2018,
+                                      ifelse(AgeRange == "Age 0.1-0.2 Ma", 200000, "NA"))))))))))))))))))))))))))) %>% 
+    mutate(MeanAge = as.numeric(ifelse(AgeRange == "1,500-3,000 yr", 2250, 
+                          ifelse(AgeRange == "11,000-30,000 yr", 20500, 
+                                 ifelse(AgeRange == "11,000-65,000 yr", 38000,
+                                    ifelse(AgeRange == "120,000-260,000 yr", 190000,
+                                           ifelse(AgeRange == "200-400 yr", 300,
+                                                  ifelse(AgeRange == "200-750 yr", 475,
+                                                         ifelse(AgeRange == "260,000-500,000 yr", 380000,
+                                                                ifelse(AgeRange == "3,000-5,000 yr", 4000,
+                                                                       ifelse(AgeRange == "30,000-50,000 yr", 40000,
+                                                                              ifelse(AgeRange == "30,000-70,000 yr", 50000,
+                                                                                     ifelse(AgeRange == "400-750 yr", 575,
+                                                                                            ifelse(AgeRange == "5,000-11,000 yr", 8000,
+                                                                                                   ifelse(AgeRange == "64,000-300,000 yr", 182000,
+                                                                                                          ifelse(AgeRange == "750-1,500 yr", 1125,
+                                                                                                                 ifelse(AgeRange == "A.D. 1410-1460", 2020-1435,
+                                                                                                                        ifelse(AgeRange == "A.D. 1790", 2020-1790,
+                                                                                                                               ifelse(AgeRange == "A.D. 1823", 2020-1823,
+                                                                                                                                      ifelse(AgeRange == "A.D. 1840", 2020-1840,
+                                                                                                                                             ifelse(AgeRange == "A.D. 1868", 2020-1868,
+                                                                                                                                                    ifelse(AgeRange == "A.D. 1880-1881", 2020-1880,
+                                                                                                                                                           ifelse(AgeRange == "A.D. 1955", 2020-1955,
+                                                                                                                                                                  ifelse(AgeRange == "A.D. 1961", 2020-1961,
+                                                                                                                                                                                ifelse(AgeRange == "A.D. 2007-2018", 2020-2012,
+                                                                                                                                                                                       ifelse(AgeRange == "A.D. 2018", 2020-2018,
+                                      ifelse(AgeRange == "Age 0.1-0.2 Ma", 150000, "NA")))))))))))))))))))))))))))
+  
+```
+
+```{r}
+# intersect with soil properties
+abanS_rmvEarlyAban_cah_soil <- st_intersection(st_make_valid(abanS_cah_natural_slim_poly), st_make_valid(hi_soil))
+# intersect with geology properties
+abanS_rmvEarlyAban_cah_geology <- st_intersection(st_make_valid(abanS_cah_natural_slim_poly), st_make_valid(hi_geology))
+
+abanS_rmvEarlyAban_cah_soil_geology <- st_intersection(st_make_valid(abanS_rmvEarlyAban_cah_soil), st_make_valid(hi_geology))
+```
+
+
+```{r}
+
+
+abanS_cah_natural_slim_poly <- abanS_cah_natural_slim %>%
+  filter(grepl("POLYGON", st_geometry_type(geometry)))
+st_write(abanS_cah_natural_slim_poly, "abandon_sugar_cah/abanS_cah_natural_slim.shp")
+```
+
+# General abandoned sugarcane plots
+```{r}
+###world
+world <- ne_countries(scale = "medium", returnclass = "sf") %>% 
+  st_transform(st_crs(4326))
+```
+
+```{r}
+main_map <- ggplot() +
+  geom_sf(data = HI_coastline) + 
+  geom_sf(data = abS_clean, aes(fill = start, color = start)) + 
+  coord_sf(xlim = c(-160.5, -154.2), ylim = c(18.5, 22.8), expand = FALSE) +
+  scale_fill_brewer(palette="YlOrRd") +
+  scale_color_brewer(palette="YlOrRd") +
+  labs(x = "Longitude (º)", y = "Latitude (º)") +
+  theme_bw()+
+  theme(panel.border = element_rect(colour = "black", fill=NA, size=1),
+  panel.background = element_rect(fill = "#2A788EFF"), panel.grid.major = element_line(size = 0.5, linetype = 'solid',
+                                colour = "#2A788EFF"))+
+  annotation_scale(location = "br")
+
+main_map
+```
+
+```{r}
+main_map + 
+  coord_sf(xlim = c(-159.9, -159.2), ylim = c(21.8, 22.3), expand = FALSE)
+```
+
+```{r}
+# not a great figure
+ggdraw(main_map) +
+  draw_plot(
+    {
+      main_map + 
+      coord_sf(xlim = c(-159.9, -159.2), ylim = c(21.8, 22.3), expand = FALSE) +
+      theme(legend.position = "none")
+    },
+    x = 0, 
+    # The distance along a (0,1) y-axis to draw the bottom edge of the plot
+    y = 0.6,
+    # The width and height of the plot expressed as proportion of the entire ggdraw object
+    width = 0.4, 
+    height = 0.4
+  )
+```
+
+Kauai plot
+```{r}
+ggplot() +
+  geom_sf(data = HI_coastline) + 
+  geom_sf(data = abS_clean, aes(fill = start, color = start)) + 
+  coord_sf(xlim = c(-159.9, -159.2), ylim = c(21.8, 22.3), expand = FALSE) +
+  #coord_sf(xlim = c(-160.5, -154.2), ylim = c(18.5, 22.8), expand = FALSE) +
+  #geom_point(data = sites, aes(x = longitude, y = latitude), size = 4, 
+  #           shape = 23, fill = "black",size=2) +
+  # annotate("text", x = -122.103777, y = 51.179863, label = "Big Bar Landslide", angle = 45) +
+  #geom_label(data=sites, aes(x=longitude, y=latitude, label=name), 
+  #           nudge_x=0.17, nudge_y=0.15, label.size=0.1,size=3, 
+  #           fontface = "bold.italic", label.r=unit(0.20, "lines"))+
+  scale_fill_brewer(palette="YlOrRd") +
+  scale_color_brewer(palette="YlOrRd") +
+  labs(x = "Longitude (º)", y = "Latitude (º)") +
+  theme_bw()+
+  theme(panel.border = element_rect(colour = "black", fill=NA, size=1),
+  panel.background = element_rect(fill = "#2A788EFF"), panel.grid.major = element_line(size = 0.5, linetype = 'solid',
+                                colour = "#2A788EFF"))+
+  annotation_scale(location = "br")
+```
+
+Oahu
+```{r}
+ggplot() +
+  geom_sf(data = HI_coastline) + 
+  geom_sf(data = abS_clean, aes(fill = start, color = start)) + 
+  coord_sf(xlim = c(-158.5, -157.5), ylim = c(21.1, 21.9), expand = FALSE) +
+  labs(x = "Longitude (º)", y = "Latitude (º)") +
+  scale_fill_brewer(palette="YlOrRd") +
+  scale_color_brewer(palette="YlOrRd") +
+  theme_bw()+
+  theme(panel.border = element_rect(colour = "black", fill=NA, size=1),
+  panel.background = element_rect(fill = "#2A788EFF"), panel.grid.major = element_line(size = 0.5, linetype = 'solid',
+                                colour = "#2A788EFF"))+
+  annotation_scale(location = "br")
+```
+
+```{r}
+sf::sf_use_s2(FALSE)
+```
+
+
+```{r}
+abS_clean$geometry <- abS_clean$geometry %>%
+  s2::s2_rebuild() %>%
+  sf::st_as_sfc()
+```
+
+
+
+```{r}
+# necessary to avoid error with the st_crop calls s2_geography_from_wkb(x, oriented = oriented, check = check)
+sf::sf_use_s2(FALSE)
+
+kauai_box <- c(xmin= -160, ymin = 21.6, xmax = -159, ymax = 22.4) # 1 x .8
+
+oahu_box <- c(xmin= -158.5, ymin = 20.9, xmax = -157.5, ymax = 21.9) # 1 x 1
+
+maui_box <- c(xmin= -156.7, ymin = 20.3, xmax = -155.9, ymax = 21.05) # 0.8 x 0.7
+
+hawaii_box <- c(xmin= -156.5, ymin = 18.8, xmax = -154.0, ymax = 20.5) # 1.7 x 1.7
+
+kauai_coast <- st_crop(HI_coastline, kauai_box)
+oahu_coast <- st_crop(HI_coastline, oahu_box)
+maui_coast <- st_crop(HI_coastline, maui_box)
+hawaii_coast <- st_crop(HI_coastline, hawaii_box)
+
+kauai_crop <- st_crop(abS_clean, kauai_box)
+oahu_crop <- st_crop(abS_clean, oahu_box)
+maui_crop <- st_crop(abS_clean, maui_box)
+hawaii_crop <- st_crop(st_make_valid(abS_clean), hawaii_box)
+
+```
+
+# Add an Island column
+```{r}
+kauai <- kauai_crop %>% 
+  mutate(Island = "Kauai")
+oahu <- oahu_crop %>% 
+  mutate(Island = "Oahu")
+maui <- maui_crop %>% 
+  mutate(Island = "Maui")
+hawaii <- hawaii_crop %>% 
+  mutate(Island = "Hawaii") 
+
+kauai_coast <- kauai_coast %>% 
+  mutate(Island = "Kauai")
+oahu_coast <- oahu_coast %>% 
+  mutate(Island = "Oahu")
+maui_coast <- maui_coast %>% 
+  mutate(Island = "Maui")
+hawaii_coast <- hawaii_coast %>% 
+  mutate(Island = "Hawaii") 
+
+```
+
+# Join the different Island shapefiles that all have the same columns so can bind the rows
+```{r}
+ka_oa <- rbind(kauai, oahu)
+ka_oa_ma <- rbind(ka_oa, maui)
+ka_oa_ma_ha <- rbind(ka_oa_ma, hawaii)
+
+ka_oa_coast <- rbind(kauai_coast, oahu_coast)
+ka_oa_ma_coast <- rbind(ka_oa_coast, maui_coast)
+ka_oa_ma_ha_coast <- rbind(ka_oa_ma_coast, hawaii_coast)
+```
+
+
+
+```{r}
+ggplot() +
+  geom_sf(data = ka_oa_ma_ha_coast) + 
+  geom_sf(data = ka_oa_ma_ha, aes(fill = start, color = start)) +
+  facet_wrap(~Island) +
+  #coord_equal() +
+  labs(x = "Longitude (º)", y = "Latitude (º)") +
+  scale_fill_brewer(palette="YlOrRd") +
+  scale_color_brewer(palette="YlOrRd") +
+  theme_bw()+
+  theme(panel.border = element_rect(colour = "black", fill=NA, size=1),
+  panel.background = element_rect(fill = "#2A788EFF"), panel.grid.major = element_line(size = 0.5, linetype = 'solid',
+                                colour = "#2A788EFF")) +
+  annotation_scale(location = "br")
+```
+
+
+# Plots using the Patchwork package
+```{r}
+
+kauai_plot <- ggplot() +
+  geom_sf(data = kauai_coast) + 
+  geom_sf(data = kauai_crop, aes(fill = start, color = start)) + 
+  coord_sf(xlim = c(-159.9, -159.1), ylim = c(21.75, 22.4), expand = FALSE) +
+  labs(x = "Longitude (º)", y = "Latitude (º)") +
+  scale_fill_brewer(palette="YlOrRd") +
+  scale_color_brewer(palette="YlOrRd") +
+  theme_bw()+
+  theme(legend.position = "none", panel.border = element_rect(colour = "black", fill=NA, size=1),
+  panel.background = element_rect(fill = "#2A788EFF"), panel.grid.major = element_line(size = 0.5, linetype = 'solid',
+                                colour = "#2A788EFF"))+
+  annotation_scale(location = "br")
+
+oahu_plot <- ggplot() +
+  geom_sf(data = oahu_coast) + 
+  geom_sf(data = oahu_crop, aes(fill = start, color = start)) +
+  coord_sf(xlim = c(-158.4, -157.5), ylim = c(21.15, 21.8), expand = FALSE) +
+  labs(x = "Longitude (º)", y = "Latitude (º)") +
+  scale_fill_brewer(palette="YlOrRd") +
+  scale_color_brewer(palette="YlOrRd") +
+  theme_bw()+
+  theme(legend.position = "none", panel.border = element_rect(colour = "black", fill=NA, size=1),
+  panel.background = element_rect(fill = "#2A788EFF"), panel.grid.major = element_line(size = 0.5, linetype = 'solid',
+                                colour = "#2A788EFF"))+
+  annotation_scale(location = "br")
+
+maui_plot <- ggplot() +
+  geom_sf(data = maui_coast) + 
+  geom_sf(data = maui_crop, aes(fill = start, color = start)) + 
+  coord_sf(xlim = c(-156.7, -155.9), ylim = c(20.5, 21.05), expand = FALSE) +
+  labs(x = "Longitude (º)", y = "Latitude (º)") +
+  scale_fill_brewer(palette="YlOrRd") +
+  scale_color_brewer(palette="YlOrRd") +
+  theme_bw()+
+  theme(legend.position = "none", panel.border = element_rect(colour = "black", fill=NA, size=1),
+  panel.background = element_rect(fill = "#2A788EFF"), panel.grid.major = element_line(size = 0.5, linetype = 'solid',
+                                colour = "#2A788EFF"))+
+  annotation_scale(location = "br")
+
+hawaii_plot <- ggplot() +
+  geom_sf(data = hawaii_coast) + 
+  geom_sf(data = hawaii_crop, aes(fill = start, color = start)) + 
+  labs(x = "Longitude (º)", y = "Latitude (º)") +
+  coord_sf(xlim = c(-156.4, -154.4), ylim = c(18.8, 20.4), expand = FALSE) +
+  scale_fill_brewer(palette="YlOrRd") +
+  scale_color_brewer(palette="YlOrRd") +
+  theme_bw()+
+  theme(legend.position = "none", panel.border = element_rect(colour = "black", fill=NA, size=1),
+  panel.background = element_rect(fill = "#2A788EFF"), panel.grid.major = element_line(size = 0.5, linetype = 'solid',
+                                colour = "#2A788EFF"))+
+  annotation_scale(location = "br")
+
+```
+
+```{r}
+# also need to look into cowplot in addition to patchwork
+# https://jayrobwilliams.com/posts/2021/05/geom-sf-facet
+kauai_plot + oahu_plot + maui_plot + hawaii_plot
+```
+
+
+```{r}
+hawaii_long <- gather(hawaii, condition, measurement, habstatus:areaHa) 
+  
+```
+
+```{r}
+hawaii_long_interest <- hawaii_long %>% 
+  filter(condition == "ndvi" | condition == "evi" | condition == "msavi" | condition == "ndmi")
+```
+
+```{r}
+ggplot() +
+  geom_sf(data = hawaii_long_interest, aes(color = measurement, fill = measurement)) +
+  scale_y_continuous(breaks = seq(18.8, 20.4, by = 0.2)) +
+  scale_x_continuous(breaks = seq(-156.4, -154.4, by = 0.2)) +
+  facet_wrap(~hawaii_long_interest$condition)
+```
+
+
+
+```{r}
+abS_cah_natural_stats <- st_read("gee_files-abanSugar/abS_cah_natural_stats.shp")
+```
+
+
+
+# Plots
+```{r}
+reserves <- st_read("env_reserves_hi/reserves.shp") %>% 
+  st_transform(st_crs(4326)) %>% 
+  st_set_precision(1000000) %>% 
+  st_make_valid() # class sf and data.frame
+```
+
+```{r}
+abS_cah_natural_stats_reserves <- st_intersection(abS_cah_natural_stats, reserves)
+```
+
+```{r}
+summary(abS_cah_natural_stats_reserves$NAME %>% as.factor())
+```
+
+
+
+```{r}
+abS_cah_natural_stats_reserves <- abS_cah_natural_stats_reserves %>% 
+  mutate(SurveyYrAb = endYr)
+
+abS_cah_natural_stats_reserves$SurveyYrAb[abS_cah_natural_stats_reserves$SurveyYrAb == 2020] <- 2016
+abS_cah_natural_stats_reserves$SurveyYrAb[abS_cah_natural_stats_reserves$SurveyYrAb == 2015] <- 1995
+
+abS_cah_natural_stats_reserves$TimeSinceAb <- 2020-abS_cah_natural_stats_reserves$SurveyYrAb
+
+abS_cah_natural_stats_reserves <- abS_cah_natural_stats_reserves %>% 
+  mutate(MaxCultTime = ifelse(startYr == 1900, SurveyYrAb - 1900, 
+                          ifelse(startYr == 1920, SurveyYrAb - 1901, 
+                                 ifelse(startYr == 1937, SurveyYrAb - 1921,
+                                    ifelse(startYr == 1980, SurveyYrAb - 1938,
+                                      ifelse(startYr == 2015, SurveyYrAb - 1981, SurveyYrAb - 2016))))))
+```
+
+
+# example plots for plotting variation in vegetation indices
+```{r}
+# example plots for plotting variation in vegetation indices
+ggplot(abS_cah_natural_stats_reserves, aes(x = TimeSinceAb, y=evi)) + 
+  geom_point(aes(color = Hab_Status))+
+  #geom_point(color = "orange") +
+  facet_wrap(~ Hab_Status) +
+  theme_bw() +
+  xlab("") +
+  ylab("Variance in EVI") +
+  labs(color = "") +
+  theme(text = element_text(size=18),
+    legend.justification = c("right", "bottom"),
+    legend.background = element_rect(colour = "black", size = 0.1),
+           legend.key.size = unit(1, "lines")) #+
+  #scale_color_manual(values = c("purple", "darkblue", "cyan", "deeppink1"))
+
+ggplot(abS_cah_natural_stats_reserves %>% filter(Maj_LC != "Not Vegetated"), aes(x = TimeSinceAb, y=ndmi)) + 
+  geom_point(aes(color = Hab_Status))+
+  #geom_point(color = "orange") +
+  facet_wrap(~ Hab_Status)
+  theme_bw() +
+  xlab("") +
+  ylab("Variance in NDMI") +
+  labs(color = "") #+
+  theme(text = element_text(size=18),
+    legend.justification = c("right", "bottom"),
+    legend.background = element_rect(colour = "black", size = 0.1),
+           legend.key.size = unit(1, "lines")) #+
+  #scale_color_manual(values = c("purple", "darkblue", "cyan", "deeppink1"))
+  
+ggplot(abS_cah_natural_stats_reserves %>% filter(Maj_LC != "Not Vegetated", abs(evi) < 2), aes(x = TimeSinceAb, y=ndmi)) + 
+  geom_point(aes(color = Hab_Status))+
+  #geom_point(color = "orange") +
+  facet_wrap(~ Maj_LC) +
+  theme_bw() +
+  xlab("") +
+  ylab("NDRE") +
+  labs(color = "") #+
+  theme(text = element_text(size=18),
+    legend.justification = c("right", "bottom"),
+    legend.background = element_rect(colour = "black", size = 0.1),
+           legend.key.size = unit(1, "lines")) #+
+  #scale_color_manual(values = c("purple", "darkblue", "cyan", "deeppink1"))
+```
+
+# biomass sample plots 
+```{r}
+ggplot(abS_cah_natural_stats_reserves %>% filter(Maj_LC != "Not Vegetated"), aes(x = TimeSinceAb, y=MEAN)) + 
+  geom_point(aes(color = Year)) +  
+  #geom_point(color = "orange") + 
+  geom_smooth(method = "lm", color = "orange") +
+  geom_smooth(method = "lm", formula = y ~ log(x), color = "darkgreen") +
+  facet_wrap(~ Moisture_Z) +
+  theme_bw() +
+  xlab("Years since abandonment") +
+  ylab(bquote('Biomass (Mg C/ha)')) +
+  labs(color = "Cultivation Began") +
+  theme(text = element_text(size=18),
+    legend.justification = c("right", "bottom"),
+    legend.background = element_rect(colour = "black", size = 0.1),
+           legend.key.size = unit(1, "lines")) #+
+  #scale_color_manual(values = c("purple", "darkblue", "cyan", "deeppink1"))
+
+```
+
+
+```{r}
+
+summarizedAreaByTimeSinceAb <- abS_cah_natural_stats_reserves %>% 
+  #filter(Maj_LC != "Not Vegetated") %>% 
+  group_by(TimeSinceAb) %>% 
+  summarise(AbBinArea = sum(areaHa)) %>% 
+  arrange(desc(TimeSinceAb)) %>%
+  mutate(prop = AbBinArea / sum(AbBinArea) *100)
+
+summarizeAreaByStartYear <- abS_cah_natural_stats_reserves %>%
+  #filter(Hab_Status != "Bare < 5% plant cover") %>% 
+  group_by(startYr) %>% 
+  summarise(AbBinArea = sum(areaHa)) %>% 
+  ungroup() %>% 
+  arrange(desc(startYr)) %>%
+  mutate(prop = AbBinArea / sum(AbBinArea) *100)
+```
+
+
+
+```{r}
+ggplot(summarizedAreaByTimeSinceAb, aes(x = "", y= AbBinArea, fill = as.factor(TimeSinceAb))) +
+  geom_bar(stat="identity", width=1) +
+  coord_polar("y", start=0) +
+  theme_void() +
+  labs(fill = "Time Since Abandonment") +
+  theme(text = element_text(size=18),
+    legend.justification = c("right", "bottom"),
+    legend.background = element_rect(colour = "black", size = 0.1),
+           legend.key.size = unit(1, "lines")) +
+  scale_fill_manual(values = c("purple", "darkblue", "cyan", "deeppink1", "red1", "orange"))
+
+ggplot(summarizeAreaByStartYear, aes(x = "", y= AbBinArea, fill = as.factor(startYr))) +
+  geom_bar(stat="identity", width=1) +
+  coord_polar("y", start=0) +
+  theme_void() +
+  labs(fill = "Initial Year Cultivated") +
+  theme(text = element_text(size=18),
+    legend.justification = c("right", "bottom"),
+    legend.background = element_rect(colour = "black", size = 0.1),
+           legend.key.size = unit(1, "lines")) 
+```
+
+
+# Plots for vegetation cover (Maj_LC)
+```{r}
+abS_cah_natural_stats_reserves$Maj_LC <- factor(abS_cah_natural_stats_reserves$Maj_LC, levels = c("Forest", "Shrubland", "Grassland", "Not Vegetated"))
+```
+
+```{r}
+ggplot(abS_cah_natural_stats_reserves, aes(fill=Maj_LC, y=areaHa, x=TimeSinceAb %>% as.factor())) + 
+    geom_bar(position="stack", stat="identity") + 
+  theme_bw() +
+  xlab("Years since abandonment") +
+  ylab(bquote('Total Area (ha)')) +
+  labs(fill = "Land Cover") +
+  theme(text = element_text(size=18),
+    legend.justification = c("right", "bottom"),
+    legend.background = element_rect(colour = "black", size = 0.1),
+           legend.key.size = unit(1, "lines")) + scale_fill_manual(values = c("darkgreen", "green2", "lightgreen", "sienna"))
+
+ggplot(abS_cah_natural_stats_reserves, aes(fill=Maj_LC, y=areaHa, x=TimeSinceAb %>% as.factor())) + 
+    geom_bar(position="fill", stat="identity") + 
+  theme_bw() +
+  xlab("Years since abandonment") +
+  ylab("Proportion of Area") +
+  labs(fill = "Land Cover") +
+  theme(text = element_text(size=18),
+    legend.justification = c("right", "bottom"),
+    legend.background = element_rect(colour = "black", size = 0.1),
+           legend.key.size = unit(1, "lines")) + scale_fill_manual(values = c("darkgreen", "green2", "lightgreen", "sienna"))
+
+ggplot(abS_cah_natural_stats_reserves %>% filter(Maj_LC != "Not Vegetated"), aes(fill=Maj_LC, y=areaHa, x=TimeSinceAb %>% as.factor())) + 
+    geom_bar(position="stack", stat="identity") + 
+  theme_bw() +
+  xlab("Years since abandonment") +
+  ylab(bquote('Total Area (ha)')) +
+  labs(fill = "Land Cover") +
+  theme(text = element_text(size=18),
+    legend.justification = c("right", "bottom"),
+    legend.background = element_rect(colour = "black", size = 0.1),
+           legend.key.size = unit(1, "lines")) + scale_fill_manual(values = c("darkgreen", "green2", "lightgreen", "sienna"))
+
+ggplot(abS_cah_natural_stats_reserves %>% filter(Maj_LC != "Not Vegetated"), aes(fill=Maj_LC, y=areaHa, x=TimeSinceAb %>% as.factor())) + 
+    geom_bar(position="fill", stat="identity") + 
+  theme_bw() +
+  xlab("Years since abandonment") +
+  ylab("Proportion of Total Area") +
+  labs(fill = "Land Cover") +
+  theme(text = element_text(size=18),
+    legend.justification = c("right", "bottom"),
+    legend.background = element_rect(colour = "black", size = 0.1),
+           legend.key.size = unit(1, "lines")) + scale_fill_manual(values = c("darkgreen", "green2", "lightgreen", "sienna"))
+```
+
+
+# Plots for vegetation composition (HabStatus)
+```{r}
+abS_cah_natural_stats_reserves$Hab_Status <- factor(abS_cah_natural_stats_reserves$Hab_Status, levels = c("Native Dominated", "Native / Alien Mix", "Bare < 5% plant cover"))
+```
+
+```{r}
+ggplot(abS_cah_natural_stats_reserves, aes(fill=Hab_Status, y=areaHa, x=TimeSinceAb %>% as.factor())) + 
+    geom_bar(position="stack", stat="identity") + 
+  theme_bw() +
+  xlab("Years since abandonment") +
+  ylab(bquote('Total Area (ha)')) +
+  labs(fill = "Land Cover") +
+  theme(text = element_text(size=18),
+    legend.justification = c("right", "bottom"),
+    legend.background = element_rect(colour = "black", size = 0.1),
+           legend.key.size = unit(1, "lines")) + scale_fill_manual(values = c("darkgreen", "orange", "sienna"), labels = c("Native", "Exotic", "Not Vegetated"))
+
+ggplot(abS_cah_natural_stats_reserves, aes(fill=Hab_Status, y=areaHa, x=TimeSinceAb %>% as.factor())) + 
+    geom_bar(position="fill", stat="identity") + 
+  theme_bw() +
+  xlab("Years since abandonment") +
+  ylab("Proportion of Area") +
+  labs(fill = "Land Cover") +
+  theme(text = element_text(size=18),
+    legend.justification = c("right", "bottom"),
+    legend.background = element_rect(colour = "black", size = 0.1),
+           legend.key.size = unit(1, "lines")) + scale_fill_manual(values = c("darkgreen", "orange", "sienna"), labels = c("Native", "Exotic", "Not Vegetated"))
+
+ggplot(abS_cah_natural_stats_reserves %>% filter(Hab_Status != "Bare < 5% plant cover"), aes(fill=Hab_Status, y=areaHa, x=TimeSinceAb %>% as.factor())) + 
+    geom_bar(position="stack", stat="identity") + 
+  #facet_wrap(~ startYr) +
+  theme_bw() +
+  xlab("Years since abandonment") +
+  ylab(bquote('Total Area ('*'km'^2*')')) +
+  labs(fill = "Land Cover") +
+  theme(text = element_text(size=18),
+    legend.justification = c("right", "bottom"),
+    legend.background = element_rect(colour = "black", size = 0.1),
+           legend.key.size = unit(1, "lines")) + scale_fill_manual(values = c("darkgreen", "orange"), labels = c("Native", "Exotic"))
+```
+
+```{r}
+MixHabitatStatus <- abS_cah_natural_stats_reserves %>% filter(Hab_Status == "Native / Alien Mix")
+
+summary(MixHabitatStatus$Det_LC) # basically all of the Mixed habitats are labeled as alien species in the Detailed LC other than a few pixels that are labeled as mixed native-alien mesic forest
+
+```
+
+
+```{r}
+abS_cah_natural_stats_reserves$VegCover = ifelse(abS_cah_natural_stats_reserves$Hab_Status == "Native Dominated", "Native", 
+                                                         ifelse(abS_cah_natural_stats_reserves$Hab_Status == "Native / Alien Mix", "Invasive", "Bare"))
+```
+
+
+
+# To Do's
+- ideally with the vegetation index extractions, will want the variance of those different vegetation indices within the different areas. Do you want that variance even if you aren't doing seasonal assessments
+- retain more of the CAH properties 
+- retain the certain soil properties in the shape you upload?
+- intesect with soil shapefile before doing the extractions on GEE?
+- include precipitation, intersect with soil shape? before doing the extraction? 
+- create the counterfactual shapes. Intersect with CAH. extract the same vegetation indices, elevation, slope, aspect, precipitation, 
