@@ -22,24 +22,20 @@ library(stargazer)
 library(kableExtra)
 library(viridis) # visualization package for color
 library(RColorBrewer)
+library(ggspatial) # required for plot annotations like scale bar
 library(raster)
 library(sp)
 library(tmap) # alternative to leaflet to do some interactive maps and maybe select polygons interactively 
 library(leaflet) # ideal for manual selection of polygons, but unsure if will have the opportunity to do that 
 library(maptools) # for zonal statistics
+library(rnaturalearth)
+library(rnaturalearthdata)
 ```
-
-```{r}
-rm(list = ls(all.names = TRUE)) #will clear all objects includes hidden objects.
-gc() #free up memrory and report the memory usage.
-```
-
-
 
 ```{r}
 HI_coastline <- st_read("coast_n83/coast_n83.shp") %>% 
-  st_transform(st_crs("+proj=utm +ellps=GRS80 +datum=WGS84")) %>% 
-  st_set_precision(1000000) %>% 
+  st_transform(st_crs(4326)) %>% 
+  st_set_precision(1e6) %>% 
   st_make_valid() # class sf and data.frame
 ```
 
@@ -61,67 +57,169 @@ Erase 2015
 s1900 <- st_read("sugar_gee/sugar1900.shp") %>% 
   st_transform(st_crs(4326)) %>% 
   st_set_precision(1e6) %>% 
-  st_make_valid()
+  st_make_valid() %>% 
+  dplyr::select(Year)
 s1920 <- st_read("sugar_gee/sugar1920.shp") %>% 
   st_transform(st_crs(4326)) %>% 
   st_set_precision(1e6) %>% 
-  st_make_valid()
+  st_make_valid() %>% 
+  dplyr::select(Year)
 s1937 <- st_read("sugar_gee/sugar1937.shp") %>% 
   st_transform(st_crs(4326)) %>% 
   st_set_precision(1e6) %>% 
-  st_make_valid()
-ag1980 <- st_read("hi_ag1980/alum.shp")%>% 
+  st_make_valid() %>% 
+  dplyr::select(Year)
+ag1980 <- st_read("sugar_gee/alum.shp") %>% 
   st_transform(st_crs(4326)) %>% 
   st_set_precision(1e6) %>% 
-  st_make_valid()
-ag2015 <- st_read("hi_ag2015/2015AgBaseline.shp")%>% 
+  st_make_valid() %>% 
+  mutate(Year = 1980)
+ag2015 <- st_read("sugar_gee/ag2015.shp") %>% 
   st_transform(st_crs(4326)) %>% 
   st_set_precision(1e6) %>% 
-  st_make_valid()
-ag2020 <- st_read("HI_Ag_2020/aglanduse_2020.shp")%>% 
+  st_make_valid() %>% 
+  mutate(Year = 2015)
+ag2020 <- st_read("sugar_gee/ag2020.shp") %>% 
   st_transform(st_crs(4326)) %>% 
   st_set_precision(1e6) %>% 
-  st_make_valid()
+  st_make_valid() %>% 
+  mutate(Year = 2020)
+```
+
+```{r}
+# Specifically filter for sugar in more recent agricultural shape files
+s1980 <- ag1980 %>% 
+  filter(commodity == 'S') %>% 
+  dplyr::select(Year)
+
+s2015 <- ag2015 %>% 
+  filter(CropCatego == "Sugar") %>% 
+  dplyr::select(Year)
+
+s2020 <- ag2020 %>% 
+  filter(Crops_2020 == 'Sugar') %>% 
+  dplyr::select(Year)
+```
+
+```{r}
+# this binds all of the different sugar shapefiles quickly. Unfortunately some of shapefiles overlap
+all_sugar <- do.call("rbind", list(s1900, s1920, s1937, s1980, s2015, s2020))
+#st_write(all_sugar, "output_files/all_sugar.gpkg", driver = "gpkg")
+```
+
+```{r}
+hi_box_poly = st_polygon(
+   list(
+     cbind(
+       c(-160.5, -154.2, -154.2, -160.5, -160.5), 
+       c(22.8, 22.8, 18.5, 18.5, 22.8))
+     )
+) 
+
+hi_box_projected = st_sfc(hi_box_poly, crs = 4326)
+```
+
+```{r}
+all_sugar$HI <- ifelse(sf::st_intersects(all_sugar, hi_box_projected, sparse = F), 
+                                 "Yes", 
+                                 "No")
 ```
 
 
 ```{r}
-pi1900 <- st_read("pineapple_ag/pineapple_1900.shp") %>% 
+
+all_sugar_summarise <- all_sugar %>% 
+  group_by(HI) %>% 
+  summarise()
+```
+```{r}
+all_sugar_year <- all_sugar %>% 
+  mutate(Year = factor(Year, levels = c(2020, 2015, 1980, 1937, 1920, 1900))) %>% 
+  group_by(Year) %>% 
+  summarize()
+```
+
+```{r}
+ggplot() +
+  geom_sf(data = HI_coastline, fill = "grey60") +
+  geom_sf(data = all_sugar_year, aes(color = Year, fill = Year)) +
+  scale_color_brewer(palette = "YlOrRd") +
+  scale_fill_brewer(palette = "YlOrRd") +
+  theme_bw()
+```
+
+```{r}
+###world
+world <- ne_countries(scale = "medium", returnclass = "sf") %>% 
+  st_transform(st_crs(4326))
+```
+
+```{r}
+ggplot() +
+  geom_sf(data = world) + 
+  geom_sf(data = all_sugar_year, aes(color = Year, fill = Year)) +
+  coord_sf(xlim = c(-160.5, -154.2), ylim = c(18.5, 22.8), expand = F) +
+  scale_color_brewer(palette = "YlOrRd") +
+  scale_fill_brewer(palette = "YlOrRd") +
+  labs(x = "Longitude (º)", y = "Latitude (º)") +
+  theme_bw()+
+  theme(panel.border = element_rect(colour = "black", fill=NA, size=1),
+  panel.background = element_rect(fill = "#2A788EFF"), panel.grid.major = element_line(size = 0.5, linetype = 'solid',
+                                colour = "#2A788EFF"))+
+  annotation_scale(location = "br")
+```
+
+```{r}
+st_write(all_sugar, "output_files/all_sugar_HI.gpkg", driver = "gpkg")
+st_write(all_sugar, "output_files/all_sugar_HI.shp")
+```
+
+```{r}
+pi1900 <- st_read("pineapple_ag/pineapple_1900.shp")  %>% 
   st_transform(st_crs(4326)) %>% 
   st_set_precision(1e6) %>% 
-  st_make_valid()
-pi1920 <- st_read("pineapple_ag/pineapple_1920.shp") %>% 
+  st_make_valid() %>% 
+  mutate(Year = 1900)
+pi1920 <- st_read("pineapple_ag/pineapple_1920.shp")  %>% 
   st_transform(st_crs(4326)) %>% 
   st_set_precision(1e6) %>% 
-  st_make_valid()
+  st_make_valid() %>% 
+  mutate(Year = 1920)
 pi1937 <- st_read("pineapple_ag/pineapple_1937.shp") %>% 
   st_transform(st_crs(4326)) %>% 
   st_set_precision(1e6) %>% 
-  st_make_valid()
-ag1980 <- st_read("hi_ag1980/alum.shp")%>% 
+  st_make_valid() %>% 
+  mutate(Year = 1937)
+ag1980 <- st_read("hi_ag1980/alum.shp")  %>% 
   st_transform(st_crs(4326)) %>% 
   st_set_precision(1e6) %>% 
-  st_make_valid()
-ag2015 <- st_read("hi_ag2015/2015AgBaseline.shp")%>% 
+  st_make_valid() %>% 
+  mutate(Year = 1980)
+ag2015 <- st_read("hi_ag2015/2015AgBaseline.shp") %>% 
   st_transform(st_crs(4326)) %>% 
   st_set_precision(1e6) %>% 
-  st_make_valid()
-ag2020 <- st_read("HI_Ag_2020/aglanduse_2020.shp")%>% 
+  st_make_valid() %>% 
+  mutate(Year = 2015)
+ag2020 <- st_read("HI_Ag_2020/aglanduse_2020.shp") %>% 
   st_transform(st_crs(4326)) %>% 
   st_set_precision(1e6) %>% 
-  st_make_valid()
+  st_make_valid() %>% 
+  mutate(Year = 2020)
 ```
 
 
 ```{r}
 pi1980 <- ag1980 %>% 
-  filter(commodity == 'P')
+  filter(commodity == 'P') %>% 
+  dplyr::select(Year)
 
 pi2015 <- ag2015 %>% 
-  filter(CropCatego == "Pineapple")
+  filter(CropCatego == "Pineapple") %>% 
+  dplyr::select(Year)
 
 pi2020 <- ag2020 %>% 
-  filter(Crops_2020 == "Pineapple")
+  filter(Crops_2020 == "Pineapple") %>% 
+  dplyr::select(Year)
 ```
 
 Want to identify when a field started being cultivated 
@@ -134,13 +232,11 @@ st_difference(
   st_union(st_combine(st_geometry(y))) %>% st_buffer(0)
 )
 }
-
 ```
 
 
 ```{r}
 # Question about st_union here is if all geometries will be valid and are basically "dissolved" boundaries of polygons that exist within each other 
-
 pine1900 <- pi1900 %>% 
   mutate(survey_yr = 1900, earliest_cult = 1891)
 
@@ -181,16 +277,6 @@ pine2020 <- st_erase(pi2020, pi_pre2020) %>%
 ```{r}
 pine1920sf <- st_as_sf(pine1920) %>% 
   mutate(survey_yr == 1920)
-```
-
-```{r}
-tm_shape(pine1920) +
-  tm_polygons() 
-
-tmap_leaflet(pine1920)
-tmap_mode("view")
-
-pine1920
 ```
 
 

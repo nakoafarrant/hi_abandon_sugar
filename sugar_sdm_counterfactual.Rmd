@@ -98,6 +98,10 @@ surf_temp <- raster("env_variables/TSurf_month_raster/tsurf_ann.tif")
 slp_pct <- raster("env_variables/landfire_topography/LH20_slppct_GCS_WGS84.tif")
 ```
 
+```{r}
+biomass_wgs84 <- raster("env_variables/Biomass/asner_biomass_30m_WGS84.tif")
+```
+
 
 ```{r}
 aspect_radians <- aspect*pi/180 # convert from degrees to radians
@@ -158,6 +162,10 @@ Ksat_resamp <- resample(Ksat_raster, precip, method = "bilinear")
 OM_resamp <- resample(OM_raster, precip, method = "bilinear")
 ```
 
+```{r}
+biomass_resamp <- resample(biomass_wgs84, precip, method = "bilinear")
+```
+
 
 ```{r}
 extent(elev_resamp)
@@ -193,6 +201,11 @@ writeRaster(pH_resamp,"env_variables/sdm_env_var/pH.tif", format="GTiff", overwr
 writeRaster(Ksat_resamp,"env_variables/sdm_env_var/Ksat.tif", format="GTiff", overwrite = T)
 writeRaster(OM_resamp,"env_variables/sdm_env_var/OM.tif", format="GTiff", overwrite = T)
 
+```
+
+```{r}
+# Might not use biomass as an environmental variable
+writeRaster(biomass_resamp,"env_variables/Biomass/biomass_WGS84_resamptoprecip.tif", format="GTiff", overwrite = T)
 ```
 
 
